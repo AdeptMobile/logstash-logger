@@ -107,30 +107,23 @@ module LogStashLogger
     end
 
     def reset_buffer
-      reset_flush_timer_thread
-
-      @buffer_state = {
-        # items accepted from including class
-        :pending_items => {},
-        :pending_count => 0,
-
-        # guard access to pending_items & pending_count
-        :pending_mutex => pending_mutex,
-
-        # items which are currently being flushed
-        :outgoing_items => {},
-        :outgoing_count => 0,
-
-        # ensure only 1 flush is operating at once
-        :flush_mutex =>    flush_mutex,
-
-        # data for timed flushes
-        :last_flush =>     Time.now,
-        :timer =>          flush_timer_thread
-      }
-
-      # events we've accumulated
-      buffer_clear_pending
+      @buffer_mutex ||= Mutex.new
+      @buffer_mutex.synchronize do
+        reset_flush_timer_thread
+        
+        @buffer_state = {
+          pending_items: {},
+          pending_count: 0,
+          pending_mutex: pending_mutex,
+          outgoing_items: {},
+          outgoing_count: 0,
+          flush_mutex: flush_mutex,
+          last_flush: Time.now,
+          timer: flush_timer_thread
+        }
+        
+        buffer_clear_pending
+      end
     end
 
     # Determine if +:max_items+ has been reached.
@@ -296,11 +289,16 @@ module LogStashLogger
     def flush_timer_thread
       @flush_timer_thread ||=
         Thread.new do
+          Thread.current.name = "logstash_logger_flush_timer"
+          Thread.current[:logstash_logger_tags] = []
+          
           loop do
-            sleep(@buffer_config[:max_interval])
             begin
+              sleep(@buffer_config[:max_interval])
               buffer_flush(:force => true)
-            rescue
+            rescue StandardError => e
+              @buffer_config[:logger]&.error("Flush timer error: #{e.class} - #{e.message}\n#{e.backtrace.join("\n")}")
+              sleep(1) # Avoid tight error loop
             end
           end
         end
